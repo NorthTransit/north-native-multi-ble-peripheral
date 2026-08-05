@@ -89,17 +89,17 @@ class Peripheral extends EventEmitter {
     this.id = nextId++;
     this._listeners = [
       nativeEvents!.addListener('onWrite', ({ id, ...args }) => {
-        if (!this.destroyed && id === this.id) {
+        if (!this.destroyed && Number(id) === this.id) {
           this.emit('write', args as WriteEvent);
         }
       }),
       nativeEvents!.addListener('onSubscribe', ({ id, ...args }) => {
-        if (!this.destroyed && id === this.id) {
+        if (!this.destroyed && Number(id) === this.id) {
           this.emit('subscribe', args as SubscriptionEvent);
         }
       }),
       nativeEvents!.addListener('onUnsubscribe', ({ id, ...args }) => {
-        if (!this.destroyed && id === this.id) {
+        if (!this.destroyed && Number(id) === this.id) {
           this.emit('unsubscribe', args as SubscriptionEvent);
         }
       }),
