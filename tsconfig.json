@@ -2,7 +2,7 @@
   "compilerOptions": {
     "baseUrl": "./",
     "paths": {
-      "@north/react-native-multi-ble-peripheral": ["./src/index"]
+      "@northtransit/react-native-multi-ble-peripheral": ["./src/index"]
     },
     "allowUnreachableCode": false,
     "allowUnusedLabels": false,

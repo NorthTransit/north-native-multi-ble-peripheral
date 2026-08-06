@@ -1,5 +1,5 @@
 {
-  "name": "@north/react-native-multi-ble-peripheral",
+  "name": "@northtransit/react-native-multi-ble-peripheral",
   "version": "0.1.9",
   "description": "test",
   "main": "lib/commonjs/index",
