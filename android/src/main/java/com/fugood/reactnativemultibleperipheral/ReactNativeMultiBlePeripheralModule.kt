@@ -487,6 +487,7 @@ class ReactNativeMultiBlePeripheralModule(reactContext: ReactApplicationContext)
       return
     }
     bluetoothLeAdvertiser.stopAdvertising(advertiseCallbacks[id])
+    advertiseCallbacks.remove(id)
     registeredDevices.remove(id)
     promise.resolve(null)
   }
