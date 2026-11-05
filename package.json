@@ -1,6 +1,6 @@
 {
   "name": "@northtransit/react-native-multi-ble-peripheral",
-  "version": "0.1.10",
+  "version": "0.1.11",
   "description": "test",
   "main": "lib/commonjs/index",
   "module": "lib/module/index",
