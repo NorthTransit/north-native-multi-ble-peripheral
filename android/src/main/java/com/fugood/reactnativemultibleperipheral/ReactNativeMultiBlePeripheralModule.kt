@@ -74,7 +74,12 @@ class ReactNativeMultiBlePeripheralModule(reactContext: ReactApplicationContext)
   }
 
   fun sendEvent(name: String, params: WritableMap) {
-    getReactApplicationContext().getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)
+    val context = getReactApplicationContext()
+    if (!context.hasActiveReactInstance()) {
+      Log.w(NAME, "dropped $name event: no active React instance")
+      return
+    }
+    context.getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)
       .emit(name, params)
   }
 
@@ -237,12 +242,16 @@ class ReactNativeMultiBlePeripheralModule(reactContext: ReactApplicationContext)
     }
     var value = Base64.decode(value, Base64.DEFAULT)
     characteristic.value = value
+    if (registeredDevices.isEmpty()) {
+      Log.w(NAME, "[server $id] notification on ${characteristic.uuid} has no subscribers; nobody receives it")
+    }
     for (device in registeredDevices) {
-      val response = bluetoothGattServer.notifyCharacteristicChanged(
+      val sent = bluetoothGattServer.notifyCharacteristicChanged(
         device,
         characteristic,
         confirm
       )
+      Log.i(NAME, "[server $id] notify $device on ${characteristic.uuid}: ${if (sent) "queued" else "FAILED"}")
     }
     promise.resolve(null)
   }
@@ -269,7 +278,19 @@ class ReactNativeMultiBlePeripheralModule(reactContext: ReactApplicationContext)
       return
     }
 
+    // A GATT server left open by an earlier startAdvertising (a stop → start
+    // or a ride switch) would keep hosting the same service next to the new
+    // one, and a passenger could discover and write to the stale copy. Close
+    // it first so there is only ever one live server per peripheral id.
+    closeGattServer(id, "startAdvertising")
+
     registeredDevices[id] = mutableSetOf<BluetoothDevice>()
+
+    // The callbacks answer requests through the server that received them.
+    // Looking the server up by id instead (as before) answered on whichever
+    // server was newest, so a request that reached an older server was never
+    // answered and the passenger's GATT operation hung until it timed out.
+    var server: BluetoothGattServer? = null
 
     val bluetoothGattServer = bluetoothManager.openGattServer(
       getReactApplicationContext(),
@@ -277,14 +298,11 @@ class ReactNativeMultiBlePeripheralModule(reactContext: ReactApplicationContext)
 
         override fun onConnectionStateChange(device: BluetoothDevice, status: Int, newState: Int) {
           super.onConnectionStateChange(device, status, newState)
-          var registeredDevices = registeredDevices[id]
-          if (registeredDevices != null) {
-            if (newState == BluetoothProfile.STATE_CONNECTED) {
-              Log.i(NAME, "BluetoothDevice CONNECTED: $device")
-            } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
-              Log.i(NAME, "BluetoothDevice DISCONNECTED: $device")
-              registeredDevices.remove(device)
-            }
+          if (newState == BluetoothProfile.STATE_CONNECTED) {
+            Log.i(NAME, "[server $id] CONNECTED: $device")
+          } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
+            Log.i(NAME, "[server $id] DISCONNECTED: $device")
+            registeredDevices[id]?.remove(device)
           }
         }
 
@@ -295,13 +313,11 @@ class ReactNativeMultiBlePeripheralModule(reactContext: ReactApplicationContext)
           characteristic: BluetoothGattCharacteristic
         ) {
           super.onCharacteristicReadRequest(device, requestId, offset, characteristic)
-          var gattServer = bluetoothGattServers[id]
-          if (gattServer != null) {
-            if (offset > characteristic.value.size) {
-              gattServer.sendResponse(device, requestId, BluetoothGatt.GATT_INVALID_OFFSET, offset, null)
-            } else {
-              gattServer.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, characteristic.value)
-            }
+          val gattServer = server ?: return
+          if (offset > characteristic.value.size) {
+            gattServer.sendResponse(device, requestId, BluetoothGatt.GATT_INVALID_OFFSET, offset, null)
+          } else {
+            gattServer.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, characteristic.value)
           }
         }
 
@@ -319,19 +335,18 @@ class ReactNativeMultiBlePeripheralModule(reactContext: ReactApplicationContext)
           value: ByteArray
         ) {
           super.onCharacteristicWriteRequest(device, requestId, characteristic, preparedWrite, responseNeeded, offset, value)
-          var gattServer = bluetoothGattServers[id]
-          if (gattServer != null) {
-            val params = Arguments.createMap()
-            params.putString("id", id.toString())
-            params.putString("device", device.address)
-            params.putString("service", characteristic.service.uuid.toString())
-            params.putString("characteristic", characteristic.uuid.toString())
-            params.putInt("offset", offset)
-            params.putString("value", Base64.encodeToString(value, Base64.NO_WRAP))
-            sendEvent("onWrite", params)
-            if (responseNeeded) {
-              gattServer.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, value)
-            }
+          val gattServer = server ?: return
+          Log.i(NAME, "[server $id] write from $device to ${characteristic.uuid} (${value.size} bytes)")
+          val params = Arguments.createMap()
+          params.putString("id", id.toString())
+          params.putString("device", device.address)
+          params.putString("service", characteristic.service.uuid.toString())
+          params.putString("characteristic", characteristic.uuid.toString())
+          params.putInt("offset", offset)
+          params.putString("value", Base64.encodeToString(value, Base64.NO_WRAP))
+          sendEvent("onWrite", params)
+          if (responseNeeded) {
+            gattServer.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, value)
           }
         }
 
@@ -342,32 +357,20 @@ class ReactNativeMultiBlePeripheralModule(reactContext: ReactApplicationContext)
           descriptor: BluetoothGattDescriptor
         ) {
           super.onDescriptorReadRequest(device, requestId, offset, descriptor)
-          var gattServer = bluetoothGattServers[id]
-          var registeredDevices = registeredDevices[id]
-          if (gattServer != null && registeredDevices != null) {
-            if (Constants.CLIENT_CONFIG == descriptor.uuid) {
-                val returnValue =
-                  if (registeredDevices.contains(device))
-                    BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
-                  else
-                    BluetoothGattDescriptor.DISABLE_NOTIFICATION_VALUE
-                gattServer.sendResponse(
-                  device,
-                  requestId,
-                  BluetoothGatt.GATT_SUCCESS,
-                  0,
-                  returnValue
-                )
-            } else {
-              Log.w(NAME, "Unknown descriptor write request")
-              gattServer.sendResponse(
-                device,
-                requestId,
-                BluetoothGatt.GATT_FAILURE,
-                0,
-                null
-              )
-            }
+          val gattServer = server ?: return
+          if (Constants.CLIENT_CONFIG == descriptor.uuid) {
+            val subscribed = registeredDevices[id]?.contains(device) == true
+            gattServer.sendResponse(
+              device,
+              requestId,
+              BluetoothGatt.GATT_SUCCESS,
+              0,
+              if (subscribed) BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+              else BluetoothGattDescriptor.DISABLE_NOTIFICATION_VALUE
+            )
+          } else {
+            Log.w(NAME, "[server $id] unknown descriptor read request: ${descriptor.uuid}")
+            gattServer.sendResponse(device, requestId, BluetoothGatt.GATT_FAILURE, 0, null)
           }
         }
 
@@ -381,40 +384,44 @@ class ReactNativeMultiBlePeripheralModule(reactContext: ReactApplicationContext)
           value: ByteArray
         ) {
           super.onDescriptorWriteRequest(device, requestId, descriptor, preparedWrite, responseNeeded, offset, value)
-          var gattServer = bluetoothGattServers[id]
-          var registeredDevices = registeredDevices[id]
-          if (gattServer != null && registeredDevices != null) {
-            if (Constants.CLIENT_CONFIG == descriptor.uuid) {
-              if (Arrays.equals(BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE, value)) {
-                registeredDevices.add(device)
-              } else if (Arrays.equals(BluetoothGattDescriptor.DISABLE_NOTIFICATION_VALUE, value)) {
-                registeredDevices.remove(device)
-              }
-              if (responseNeeded) {
-                gattServer.sendResponse(
-                  device,
-                  requestId,
-                  BluetoothGatt.GATT_SUCCESS,
-                  0,
-                  null
-                )
-              }
-            } else {
-              Log.w(NAME, "Unknown descriptor write request")
-              gattServer.sendResponse(
-                device,
-                requestId,
-                BluetoothGatt.GATT_FAILURE,
-                0,
-                null
-              )
+          val gattServer = server ?: return
+          if (Constants.CLIENT_CONFIG == descriptor.uuid) {
+            // Always answer a subscription request, even while not advertising.
+            // A passenger's CCCD write that gets no response blocks every
+            // later GATT operation on its connection, including the payment
+            // write, until the stack's timeout.
+            val subscribers = registeredDevices[id]
+            if (Arrays.equals(BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE, value)) {
+              subscribers?.add(device)
+              Log.i(NAME, "[server $id] subscribed: $device (${subscribers?.size ?: 0} subscriber(s))")
+            } else if (Arrays.equals(BluetoothGattDescriptor.DISABLE_NOTIFICATION_VALUE, value)) {
+              subscribers?.remove(device)
+              Log.i(NAME, "[server $id] unsubscribed: $device")
+            }
+            if (subscribers == null) {
+              Log.w(NAME, "[server $id] subscription from $device while not advertising; answered anyway")
+            }
+            if (responseNeeded) {
+              gattServer.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, null)
+            }
+          } else {
+            Log.w(NAME, "[server $id] unknown descriptor write request: ${descriptor.uuid}")
+            if (responseNeeded) {
+              gattServer.sendResponse(device, requestId, BluetoothGatt.GATT_FAILURE, 0, null)
             }
           }
         }
 
       }
     )
+    if (bluetoothGattServer == null) {
+      registeredDevices.remove(id)
+      promise.reject("error", "Could not open GATT server (is Bluetooth on?)")
+      return
+    }
+    server = bluetoothGattServer
     bluetoothGattServers[id] = bluetoothGattServer
+    Log.i(NAME, "[server $id] GATT server opened")
 
     for (service in services[id]!!.values) {
       bluetoothGattServer.addService(service)
@@ -487,8 +494,15 @@ class ReactNativeMultiBlePeripheralModule(reactContext: ReactApplicationContext)
       return
     }
     bluetoothLeAdvertiser.stopAdvertising(advertiseCallbacks[id])
+    // Clearing the callback is what lets the next startAdvertising run (North BUG #005).
     advertiseCallbacks.remove(id)
     registeredDevices.remove(id)
+    // Close the GATT server with the advertisement. Left open, it kept
+    // accepting connections with no subscriber list, so subscription requests
+    // went unanswered, and the next startAdvertising opened a second server
+    // beside it (North BUG #011).
+    closeGattServer(id, "stopAdvertising")
+    Log.i(NAME, "[server $id] advertising stopped")
     promise.resolve(null)
   }
 
@@ -502,14 +516,56 @@ class ReactNativeMultiBlePeripheralModule(reactContext: ReactApplicationContext)
     if (callback != null && bluetoothLeAdvertiser != null) {
       bluetoothLeAdvertiser.stopAdvertising(callback)
     }
-    bluetoothGattServers[id]?.close()
-    bluetoothGattServers.remove(id)
+    closeGattServer(id, "destroyPeripheral")
     bluetoothLeAdvertisers.remove(id)
     advertiseCallbacks.remove(id)
     registeredDevices.remove(id)
     promise.resolve(null)
   }
 
+  /**
+   * Close and forget the GATT server for this peripheral id. Safe to call
+   * when there is none. Never throws: it runs on teardown paths.
+   */
+  private fun closeGattServer(id: Int, reason: String) {
+    val server = bluetoothGattServers.remove(id) ?: return
+    try {
+      server.clearServices()
+      server.close()
+      Log.i(NAME, "[server $id] GATT server closed ($reason)")
+    } catch (e: Exception) {
+      Log.w(NAME, "[server $id] closing GATT server failed ($reason)", e)
+    }
+  }
+
+  /**
+   * React Native calls this when it throws this module instance away: a JS
+   * reload (Metro "r", dev-menu Reload, red-box recovery) or the React
+   * instance shutting down. JS cleanup (useEffect returns, BLEFacade.destroy)
+   * does NOT run on a reload, so without this the old advertiser and GATT
+   * server stayed registered with the Bluetooth stack for the life of the
+   * process. The reloaded app then opened a second server beside it, and a
+   * passenger that reached the stale one had its payment delivered to the
+   * dead JS instance: no ack, and a timeout (North BUG #011).
+   */
+  override fun invalidate() {
+    Log.i(NAME, "invalidate: releasing ${advertiseCallbacks.size} advertiser(s) and ${bluetoothGattServers.size} GATT server(s)")
+    for ((id, callback) in advertiseCallbacks) {
+      try {
+        bluetoothLeAdvertisers[id]?.stopAdvertising(callback)
+      } catch (e: Exception) {
+        Log.w(NAME, "[server $id] stopAdvertising failed during invalidate", e)
+      }
+    }
+    for (id in bluetoothGattServers.keys.toList()) {
+      closeGattServer(id, "invalidate")
+    }
+    advertiseCallbacks.clear()
+    registeredDevices.clear()
+    bluetoothLeAdvertisers.clear()
+    services.clear()
+    super.invalidate()
+  }
 
   companion object {
     const val NAME = "ReactNativeMultiBlePeripheral"
