@@ -69,6 +69,8 @@ export interface WriteEvent {
   serviceUuid: string;
   characteristicUuid: string;
   value: string;
+  /** The writer: a MAC address on Android, the central's identifier on iOS. Pass it to notifyDevice. */
+  device?: string;
 }
 
 export interface SubscriptionEvent {
@@ -200,6 +202,27 @@ class Peripheral extends EventEmitter {
       characteristicUuid,
       value.toString('base64'),
       isIndication
+    );
+  }
+
+  /**
+   * Notify ONE subscribed device, e.g. the `device` of the write being
+   * answered, instead of every subscriber. Rejects if it isn't subscribed.
+   */
+  async notifyDevice(
+    serviceUuid: string,
+    characteristicUuid: string,
+    value: Buffer,
+    deviceId: string,
+    isIndication: boolean = false
+  ) {
+    return NativePeripheral.notifyDevice(
+      this.id,
+      serviceUuid,
+      characteristicUuid,
+      value.toString('base64'),
+      isIndication,
+      deviceId
     );
   }
 

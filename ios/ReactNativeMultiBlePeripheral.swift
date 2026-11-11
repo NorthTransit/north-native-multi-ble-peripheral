@@ -18,6 +18,9 @@ class ReactNativeMultiBlePeripheral: RCTEventEmitter, CBPeripheralManagerDelegat
   var startRejects: [Int: RCTPromiseRejectBlock] = [:]
   var startResolves: [Int: RCTPromiseResolveBlock] = [:]
   var services: [Int: [String:CBMutableService]] = [:]
+  // Subscribed centrals per peripheral id, by identifier, so notifyDevice can
+  // reach one of them (North BUG #007).
+  var subscribedCentrals: [Int: [String: CBCentral]] = [:]
   var deviceName: String = ""
 
   deinit {
@@ -257,6 +260,39 @@ class ReactNativeMultiBlePeripheral: RCTEventEmitter, CBPeripheralManagerDelegat
     }
   }
 
+  // Like sendNotification, but to ONE subscribed central: the `device` from the
+  // write event being answered (North BUG #007). Rejects if it isn't subscribed.
+  @objc(notifyDevice:serviceUUID:characteristicUUID:value:confirm:deviceId:withResolver:withRejecter:)
+  func notifyDevice(
+    _ id: Int,
+    serviceUUID: String,
+    characteristicUUID: String,
+    value: String,
+    confirm: Bool,
+    deviceId: String,
+    resolve: @escaping RCTPromiseResolveBlock,
+    reject: @escaping RCTPromiseRejectBlock
+  ) -> Void {
+    let uuid = CBUUID(string: characteristicUUID)
+    guard
+      let manager = managers[id],
+      let characteristic = getCharacteristic(id, serviceUUID, uuid),
+      let data = Data(base64Encoded: value)
+    else {
+      reject("error", "Not found characteristic", nil)
+      return
+    }
+    guard let central = subscribedCentrals[id]?[deviceId] else {
+      reject("error", "Device \(deviceId) is not subscribed", nil)
+      return
+    }
+    if manager.updateValue(data, for: characteristic, onSubscribedCentrals: [central]) {
+      resolve(nil)
+    } else {
+      reject("error", "Send notification failed", nil)
+    }
+  }
+
   @objc(destroyPeripheral:withResolver:withRejecter:)
   func destroyPeripheral(
     _ id: Int,
@@ -274,6 +310,7 @@ class ReactNativeMultiBlePeripheral: RCTEventEmitter, CBPeripheralManagerDelegat
     manager!.removeAllServices()
     managers.removeValue(forKey: id)
     services.removeValue(forKey: id)
+    subscribedCentrals.removeValue(forKey: id)
     resolve(nil)
   }
 
@@ -304,6 +341,7 @@ class ReactNativeMultiBlePeripheral: RCTEventEmitter, CBPeripheralManagerDelegat
         "serviceUUID": serviceUUID,
         "characteristicUUID": characteristicUUID,
         "value": base64,
+        "device": request.central.identifier.uuidString,
       ])
     }
   }
@@ -341,6 +379,9 @@ class ReactNativeMultiBlePeripheral: RCTEventEmitter, CBPeripheralManagerDelegat
     didSubscribeTo characteristic: CBCharacteristic
   ) {
     let id = managers.someKey(forValue: peripheral)
+    if let id = id {
+      subscribedCentrals[id, default: [:]][central.identifier.uuidString] = central
+    }
     let characteristicUUID = characteristic.uuid.uuidString
     let serviceUUID = characteristic.service?.uuid.uuidString
     sendEvent(withName: "onSubscribe", body: [
@@ -356,6 +397,9 @@ class ReactNativeMultiBlePeripheral: RCTEventEmitter, CBPeripheralManagerDelegat
     didUnsubscribeFrom characteristic: CBCharacteristic
   ) {
     let id = managers.someKey(forValue: peripheral)
+    if let id = id {
+      subscribedCentrals[id]?.removeValue(forKey: central.identifier.uuidString)
+    }
     let characteristicUUID = characteristic.uuid.uuidString
     let serviceUUID = characteristic.service?.uuid.uuidString
     sendEvent(withName: "onUnsubscribe", body: [

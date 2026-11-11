@@ -220,6 +220,39 @@ class ReactNativeMultiBlePeripheralModule(reactContext: ReactApplicationContext)
     confirm: Boolean,
     promise: Promise
   ) {
+    notify(id, serviceUUID, characteristicUUID, value, confirm, null, promise)
+  }
+
+  /**
+   * Like sendNotification, but to ONE subscribed device: the `device` address
+   * from the write event being answered. North uses it so a passenger's ack
+   * reaches only that passenger, never every subscriber (North BUG #007).
+   * Rejects if that device isn't subscribed, rather than falling back to
+   * notifying everyone.
+   */
+  @ReactMethod
+  fun notifyDevice(
+    id: Int,
+    serviceUUID: String,
+    characteristicUUID: String,
+    value: String,
+    confirm: Boolean,
+    deviceAddress: String,
+    promise: Promise
+  ) {
+    notify(id, serviceUUID, characteristicUUID, value, confirm, deviceAddress, promise)
+  }
+
+  /** Notify every subscriber (deviceAddress == null) or just one. */
+  private fun notify(
+    id: Int,
+    serviceUUID: String,
+    characteristicUUID: String,
+    value: String,
+    confirm: Boolean,
+    deviceAddress: String?,
+    promise: Promise
+  ) {
     val bluetoothGattServer = bluetoothGattServers[id]
     if (bluetoothGattServer == null) {
       promise.reject("error", "Have not started advertising")
@@ -240,20 +273,35 @@ class ReactNativeMultiBlePeripheralModule(reactContext: ReactApplicationContext)
       promise.reject("error", "Not found characteristic")
       return
     }
-    var value = Base64.decode(value, Base64.DEFAULT)
-    characteristic.value = value
-    if (registeredDevices.isEmpty()) {
-      Log.w(NAME, "[server $id] notification on ${characteristic.uuid} has no subscribers; nobody receives it")
+    // Snapshot: GATT callbacks add and remove subscribers on binder threads.
+    val subscribers = registeredDevices.toList()
+    val targets = if (deviceAddress == null) {
+      subscribers
+    } else {
+      subscribers.filter { it.address.equals(deviceAddress, ignoreCase = true) }
     }
-    for (device in registeredDevices) {
-      val sent = bluetoothGattServer.notifyCharacteristicChanged(
-        device,
-        characteristic,
-        confirm
-      )
+    if (targets.isEmpty()) {
+      if (deviceAddress == null) {
+        Log.w(NAME, "[server $id] notification on ${characteristic.uuid} has no subscribers; nobody receives it")
+        promise.resolve(null)
+      } else {
+        Log.w(NAME, "[server $id] $deviceAddress is not subscribed to ${characteristic.uuid}; notification not sent")
+        promise.reject("error", "Device $deviceAddress is not subscribed")
+      }
+      return
+    }
+    characteristic.value = Base64.decode(value, Base64.DEFAULT)
+    var allSent = true
+    for (device in targets) {
+      val sent = bluetoothGattServer.notifyCharacteristicChanged(device, characteristic, confirm)
+      if (!sent) allSent = false
       Log.i(NAME, "[server $id] notify $device on ${characteristic.uuid}: ${if (sent) "queued" else "FAILED"}")
     }
-    promise.resolve(null)
+    if (deviceAddress != null && !allSent) {
+      promise.reject("error", "Notification to $deviceAddress failed")
+    } else {
+      promise.resolve(null)
+    }
   }
 
   @ReactMethod
