@@ -7,5 +7,6 @@ Native changes North Transit made on top of upstream `react-native-multi-ble-per
 | #003 | Write events reach JS: listener ids normalized (`f4e35d0`) | 0.1.9 |
 | #005 | `stopAdvertising` clears `advertiseCallbacks[id]` so advertising can restart | 0.1.10 |
 | #011 | `invalidate()` releases advertisers and GATT servers on a JS reload; one GATT server per peripheral (closed on stop, closed before reopen); callbacks answer on the server that got the request; CCCD writes always answered; no events into a dead React instance; diagnostic logging | 0.1.11 |
+| #007 | `notifyDevice(serviceUuid, characteristicUuid, value, deviceId)`: notify one subscribed device instead of all; write events carry `device` on iOS too (Android already did) | unreleased (`feat/per-device-ack`) |
 
 Logs: `adb logcat -s ReactNativeMultiBlePeripheral`.

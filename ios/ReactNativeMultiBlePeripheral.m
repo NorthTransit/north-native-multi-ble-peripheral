@@ -59,4 +59,13 @@ RCT_EXTERN_METHOD(sendNotification:(NSInteger *)index
                   withResolver:(RCTPromiseResolveBlock)resolve
                   withRejecter:(RCTPromiseRejectBlock)reject)
 
+RCT_EXTERN_METHOD(notifyDevice:(NSInteger *)index
+                  serviceUUID:(NSString *)serviceUUID
+                  characteristicUUID:(NSString *)characteristicUUID
+                  value:(NSString *)value
+                  confirm:(BOOL)confirm
+                  deviceId:(NSString *)deviceId
+                  withResolver:(RCTPromiseResolveBlock)resolve
+                  withRejecter:(RCTPromiseRejectBlock)reject)
+
 @end
